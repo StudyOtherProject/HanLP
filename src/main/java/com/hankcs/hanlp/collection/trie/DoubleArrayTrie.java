@@ -15,6 +15,7 @@
  */
 package com.hankcs.hanlp.collection.trie;
 
+import com.hankcs.hanlp.collection.AhoCorasick.AhoCorasickDoubleArrayTrie;
 import com.hankcs.hanlp.corpus.io.ByteArray;
 import com.hankcs.hanlp.corpus.io.ByteArrayStream;
 import com.hankcs.hanlp.corpus.io.IOUtil;
@@ -58,7 +59,6 @@ public class DoubleArrayTrie<V> implements Serializable, ITrie<V>
     protected int check[];
     protected int base[];
 
-    private BitSet used;
     /**
      * base 和 check 的大小
      */
@@ -158,7 +158,7 @@ public class DoubleArrayTrie<V> implements Serializable, ITrie<V>
      * @param siblings 等待插入的兄弟节点
      * @return 插入位置
      */
-    private int insert(List<Node> siblings)
+    private int insert(List<Node> siblings, BitSet used)
     {
         if (error_ < 0)
             return 0;
@@ -253,7 +253,7 @@ public class DoubleArrayTrie<V> implements Serializable, ITrie<V>
             }
             else
             {
-                int h = insert(new_siblings);   // dfs
+                int h = insert(new_siblings, used);   // dfs
                 base[begin + siblings.get(i).code] = h;
 //                System.out.println(this);
             }
@@ -265,7 +265,6 @@ public class DoubleArrayTrie<V> implements Serializable, ITrie<V>
     {
         check = null;
         base = null;
-        used = new BitSet();
         size = 0;
         allocSize = 0;
         // no_delete_ = false;
@@ -299,7 +298,6 @@ public class DoubleArrayTrie<V> implements Serializable, ITrie<V>
         // if (! no_delete_)
         check = null;
         base = null;
-        used = null;
         allocSize = 0;
         size = 0;
         // no_delete_ = false;
@@ -389,7 +387,7 @@ public class DoubleArrayTrie<V> implements Serializable, ITrie<V>
     public int build(List<String> _key, int _length[], int _value[],
                      int _keySize)
     {
-        if (_keySize > _key.size() || _key == null)
+        if (_key == null || _keySize > _key.size())
             return 0;
 
         // progress_func_ = progress_func;
@@ -398,6 +396,7 @@ public class DoubleArrayTrie<V> implements Serializable, ITrie<V>
         keySize = _keySize;
         value = _value;
         progress = 0;
+        allocSize = 0;
 
         resize(65536 * 32); // 32个双字节
 
@@ -411,12 +410,12 @@ public class DoubleArrayTrie<V> implements Serializable, ITrie<V>
 
         List<Node> siblings = new ArrayList<Node>();
         fetch(root_node, siblings);
-        insert(siblings);
+        insert(siblings, new BitSet());
+        shrink();
 
         // size += (1 << 8 * 2) + 1; // ???
         // if (size >= allocSize) resize (size);
 
-        used = null;
         key = null;
         length = null;
 
@@ -543,7 +542,6 @@ public class DoubleArrayTrie<V> implements Serializable, ITrie<V>
             check[i] = byteArray.nextInt();
         }
         v = value;
-        used = null;    // 无用的对象,释放掉
         return true;
     }
 
@@ -569,7 +567,6 @@ public class DoubleArrayTrie<V> implements Serializable, ITrie<V>
             offset += 4;
         }
         v = value;
-        used = null;    // 无用的对象,释放掉
         return true;
     }
 
@@ -1302,10 +1299,12 @@ public class DoubleArrayTrie<V> implements Serializable, ITrie<V>
                     if (begin == arrayLength) break;
                     if (value != null)
                     {
+                        i = begin + length;         // 输出最长词后，从该词语的下一个位置恢复扫描
                         return true;
                     }
 
-                    begin = i + 1;                   // 转移失败，重新开始，状态归零
+                    i = begin;                      // 转移失败，也将起点往前挪一个，重新开始，状态归零
+                    ++begin;
                     b = base[0];
                 }
                 p = b;
@@ -1322,6 +1321,21 @@ public class DoubleArrayTrie<V> implements Serializable, ITrie<V>
         }
     }
 
+    /**
+     * 全切分
+     *
+     * @param text      文本
+     * @param processor 处理器
+     */
+    public void parseText(String text, AhoCorasickDoubleArrayTrie.IHit<V> processor)
+    {
+        Searcher searcher = getSearcher(text, 0);
+        while (searcher.next())
+        {
+            processor.hit(searcher.begin, searcher.begin + searcher.length, searcher.value);
+        }
+    }
+
     public LongestSearcher getLongestSearcher(String text, int offset)
     {
         return getLongestSearcher(text.toCharArray(), offset);
@@ -1330,6 +1344,21 @@ public class DoubleArrayTrie<V> implements Serializable, ITrie<V>
     public LongestSearcher getLongestSearcher(char[] text, int offset)
     {
         return new LongestSearcher(offset, text);
+    }
+
+    /**
+     * 最长匹配
+     *
+     * @param text      文本
+     * @param processor 处理器
+     */
+    public void parseLongestText(String text, AhoCorasickDoubleArrayTrie.IHit<V> processor)
+    {
+        LongestSearcher searcher = getLongestSearcher(text, 0);
+        while (searcher.next())
+        {
+            processor.hit(searcher.begin, searcher.begin + searcher.length, searcher.value);
+        }
     }
 
     /**
@@ -1383,6 +1412,24 @@ public class DoubleArrayTrie<V> implements Serializable, ITrie<V>
     public V get(int index)
     {
         return v[index];
+    }
+
+    /**
+     * 释放空闲的内存
+     */
+    private void shrink()
+    {
+//        if (HanLP.Config.DEBUG)
+//        {
+//            System.err.printf("释放内存 %d bytes\n", base.length - size - 65535);
+//        }
+        int nbase[] = new int[size + 65535];
+        System.arraycopy(base, 0, nbase, 0, size);
+        base = nbase;
+
+        int ncheck[] = new int[size + 65535];
+        System.arraycopy(check, 0, ncheck, 0, size);
+        check = ncheck;
     }
 
 
